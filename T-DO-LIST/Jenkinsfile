@@ -1,0 +1,143 @@
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_IMAGE = 'todo-devops-app'
+        DOCKER_TAG = "${BUILD_NUMBER}"
+        REGISTRY = 'your-registry.com'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out source code...'
+                checkout scm
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                echo 'Installing Node.js dependencies...'
+                sh 'npm ci'
+            }
+        }
+        
+        stage('Lint & Test') {
+            parallel {
+                stage('Lint') {
+                    steps {
+                        echo 'Running ESLint...'
+                        sh 'npm run lint'
+                    }
+                }
+                stage('Test') {
+                    steps {
+                        echo 'Running tests...'
+                        sh 'npm test'
+                    }
+                }
+            }
+        }
+        
+        stage('Build Application') {
+            steps {
+                echo 'Building React application...'
+                sh 'npm run build'
+            }
+        }
+        
+        stage('SonarQube Analysis') {
+            steps {
+                echo 'Running SonarQube analysis...'
+                script {
+                    def scannerHome = tool 'SonarQubeScanner'
+                    withSonarQubeEnv('SonarQube') {
+                        sh "${scannerHome}/bin/sonar-scanner"
+                    }
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                echo 'Building Docker image...'
+                script {
+                    def image = docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}")
+                    docker.withRegistry("https://${REGISTRY}", 'docker-registry-credentials') {
+                        image.push()
+                        image.push('latest')
+                    }
+                }
+            }
+        }
+        
+        stage('Security Scan') {
+            steps {
+                echo 'Running security scan...'
+                sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image ${DOCKER_IMAGE}:${DOCKER_TAG}'
+            }
+        }
+        
+        stage('Deploy to Staging') {
+            steps {
+                echo 'Deploying to staging environment...'
+                sh '''
+                    docker stop todo-app-staging || true
+                    docker rm todo-app-staging || true
+                    docker run -d --name todo-app-staging -p 8080:80 ${DOCKER_IMAGE}:${DOCKER_TAG}
+                '''
+            }
+        }
+        
+        stage('Integration Tests') {
+            steps {
+                echo 'Running integration tests...'
+                sh 'sleep 10' // Wait for container to start
+                sh 'curl -f http://localhost:8080 || exit 1'
+            }
+        }
+        
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo 'Deploying to production...'
+                script {
+                    input message: 'Deploy to production?', ok: 'Deploy'
+                    
+                    // Deploy to cloud platform (AWS/Heroku)
+                    sh '''
+                        # Example deployment commands
+                        echo "Deploying to production environment..."
+                        # heroku container:push web --app your-app-name
+                        # heroku container:release web --app your-app-name
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Cleaning up...'
+            sh 'docker system prune -f'
+        }
+        success {
+            echo 'Pipeline completed successfully!'
+            emailext (
+                subject: "✅ Build Success: ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
+                body: "The build completed successfully. Check console output at ${env.BUILD_URL}",
+                to: "${env.CHANGE_AUTHOR_EMAIL}"
+            )
+        }
+        failure {
+            echo 'Pipeline failed!'
+            emailext (
+                subject: "❌ Build Failed: ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
+                body: "The build failed. Check console output at ${env.BUILD_URL}",
+                to: "${env.CHANGE_AUTHOR_EMAIL}"
+            )
+        }
+    }
+}
